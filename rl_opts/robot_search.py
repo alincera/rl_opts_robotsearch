@@ -63,31 +63,22 @@ def isBetween_c_vec_numba(a, b, c, r):
 # %% ../nbs/lib_nbs/06_robot_search.ipynb 16
 @jit(nopython = NOPYTHON)
 def rotation_arc(theta : float, # Angle in rad (from origin, counterclockwise) describing the current orientation of the robot.
-                 dtheta : float, # Angle difference in rad. How much the robot rotates when it decides to turn.
-                 left : bool, # True if robot decided to turn left. False implies that the agent turns right.
+                 dtheta : float, # Angle difference in rad (with appropriate sign!! Left turn: dtheta>0, Right turn: dtheta<0). How much the robot rotates when it decides to turn.
                  num_points_arc:int=50, # Number of points that form the arc that is going to be evaluated.
-                 R:float=1, # Rotation radius, distance from robot's center to the side. The robot reorients itself by rotating along the wheels of one side.
+                 R:float=1, # Rotation radius.
                  x:float=0, # Horizontal component of the robot's current position.
                  y:float=0 # Vertical component of the robot's current position.
                 ):
     """Creates the points of the circumference arc covered by the robot while it reorients itself (action "turn")."""
     
-    if left:
-        value = 1
-        sum_angle = 0
-    else:
-        value = -1
-        sum_angle = np.pi
-    
-    phi = np.pi / 2 - theta
+    phi = np.pi - theta
     
     # Get origin of rotation
-    origin_x = x - value * R * np.cos(phi)
-    origin_y = y + value * R * np.sin(phi)
+    origin_x = x -  R * np.cos(phi)
+    origin_y = y +  R * np.sin(phi)
     
     # Generate points for the arc in rad: from start point to final point = start point + length of arc
-    start_angle = sum_angle - phi
-    angles = np.linspace(start_angle, start_angle + dtheta, num_points_arc)
+    angles = np.linspace(-phi, -phi + dtheta, num_points_arc)
     x_arc = origin_x + R * np.cos(angles) #x positions of all the arc points
     y_arc = origin_y + R * np.sin(angles) #y positions of all the arc points
     
@@ -129,7 +120,7 @@ def rand_choice_nb(arr : np.array, # 1D numpy array of values to sample from.
 # %% ../nbs/lib_nbs/06_robot_search.ipynb 25
 from .rl_framework.numba.agents import Forager
 
-# %% ../nbs/lib_nbs/06_robot_search.ipynb 29
+# %% ../nbs/lib_nbs/06_robot_search.ipynb 32
 @jitclass([("target_positions", float64[:,:]) ,
            ("current_rewards", float64[:]) ,
            ("tau_allagents", float64[:]) ,
@@ -165,7 +156,7 @@ class RobotSearch():
                  L:float, # Size of the (squared) world.
                  r:float, # Radius with center the target position. It defines the area in which agent detects the target.
                  tau:float, # Time it takes for the targets to replenish.
-                 agent_radius:float, # Size of the agent (radius, from the center to the side).
+                 agent_radius:float, # Distance from robot's center to detector.
                  avg_vel:float, # Mean displacement of the agent per time step (v). Normal distr.: N(v,std_v).
                  std_vel:float, # Std for the normal distr. of the agent's velocity (std_v).
                  avg_turn_angle:float, # Mean turning angle (in rad) when agent decides to turn (Theta). Normal distr.: N(Theta,std_theta).
@@ -251,21 +242,20 @@ class RobotSearch():
             if action == 1: #left turn
                 # Get angle difference
                 dtheta = np.random.normal(self.avg_turn_angle, self.std_turn_angle)
-                left = True
 
             elif action == 2: #right turn
                 # Get angle difference
                 dtheta = - np.random.normal(self.avg_turn_angle, self.std_turn_angle)
-                left = False
 
             # Get new orientation of the agent
             new_theta = self.current_directions[agent_index] + dtheta
             # Get the positional changes
-            dx =  np.sign(dtheta) * self.agent_radius * (np.sin(new_theta) - np.sin(self.current_directions[agent_index]))
-            dy = - np.sign(dtheta) * self.agent_radius * (np.cos(new_theta) - np.cos(self.current_directions[agent_index]))
+            dx = self.agent_radius * (np.cos(self.current_directions[agent_index]) - np.cos(new_theta))
+            dy = self.agent_radius * (np.sin(self.current_directions[agent_index]) - np.sin(new_theta))
+            
             
             # Get arc coordinates (default: 50 points)
-            x_arc, y_arc = rotation_arc(self.current_directions[agent_index], dtheta, left, R=self.agent_radius, x=self.positions[agent_index][0], y=self.positions[agent_index][1])
+            x_arc, y_arc = rotation_arc(self.current_directions[agent_index], dtheta, R=self.agent_radius, x=self.positions[agent_index][0], y=self.positions[agent_index][1])
             
             # Update agent's orientation
             self.current_directions[agent_index] = new_theta
@@ -349,20 +339,25 @@ class RobotSearch():
         self.positions[agent_index][0]  = max( 0, min( self.positions[agent_index][0] , self.L ) )
         self.positions[agent_index][1]  = max( 0, min( self.positions[agent_index][1] , self.L ) )
 
-# %% ../nbs/lib_nbs/06_robot_search.ipynb 32
+# %% ../nbs/lib_nbs/06_robot_search.ipynb 35
 @jit(nopython = NOPYTHON)
 def train_loop_robot(episodes : int, # Number of episodes to train
                    time_ep : int, # Length of episode
                    agent : object, # Agent class
                    env : object, # Environment class
-                   h_mat_allT : bool = False # If True, returns the h_matrix at all times
+                   time_steps_save_h = None #Optional: int, every time_steps_save_h, the h_matrix is stored. Default: time_ep (at the end of episode)
                   )-> tuple: # Rewards and h-matrix of the trained agent      
     '''    
     Given an agent and environment, performs a loop train for the `RobotSearch` environment.
     '''
-
-    if h_mat_allT: policy_t = np.zeros((episodes, agent.h_matrix.shape[-1]))
     
+    if time_steps_save_h == None:
+        time_steps_save_h = time_ep
+    #Initialize storage of h matrices (it overwrites every episode)
+    number_stored_h_matrices = int(time_ep / time_steps_save_h)
+    save_h_matrices = np.zeros((number_stored_h_matrices, agent.h_matrix.shape[-2],agent.h_matrix.shape[-1]))
+    
+    #Initialize storage of rewards
     save_rewards = np.zeros((episodes, time_ep))
     
     for ep in range(episodes):
@@ -372,24 +367,16 @@ def train_loop_robot(episodes : int, # Number of episodes to train
         agent.reset_g()
 
         for t in range(time_ep):
-            agent.N_upd_H += 1
-            agent.N_upd_G += 1
+            
             
             #step to set counter to its min value n=1
-            if t == 0 or env.current_rewards[0] == 1:
+            if t == 0:
                 #do one step with random direction (no learning in this step)
                 action = rand_choice_nb(arr = np.arange(1, agent.num_actions), prob = np.array([1/len(np.arange(1,agent.num_actions))]*len(np.arange(1,agent.num_actions))))
                 _,_ = env.update_pos(action)
                 #check boundary conditions
                 env.check_bc()
-                #reset counter
-                agent.agent_state = 0
-                #update current rewards
-                env.current_rewards[0] = 0
-                reward = 0
-                #update replenishing times
-                env.update_replenishing_times()
-
+                
             else:
                 #get perception
                 state = agent.get_state()
@@ -397,7 +384,7 @@ def train_loop_robot(episodes : int, # Number of episodes to train
                 action = agent.deliberate(state)
                 #act (update counter)
                 agent.act(action)
-
+                
                 #update positions and get coordinates for turning arc (in case agent turned, otherwise these are None)
                 x_arc, y_arc = env.update_pos(action)
                 
@@ -409,30 +396,45 @@ def train_loop_robot(episodes : int, # Number of episodes to train
                 
                 #check boundary conditions
                 env.check_bc()
+                
                 #learn
                 if reward == 1:
                     agent._learn_post_reward(reward)
-
+                    
+                    #reset counter and g matrix
+                    agent.agent_state = 0
+                    agent.reset_g()
+                    
+            #If H matrix has not been updated for max_no_H_update steps, it updates.
             if agent.N_upd_H == agent.max_no_H_update-1:
                 agent._learn_post_reward(reward)
-
-            # Saving
+            
+            #Saving time step
+            if (t+1) % time_steps_save_h == 0:
+                
+                #Update of the H matrix, in case it was not updated in the last time step
+                if agent.N_upd_H != 0:
+                    agent._learn_post_reward(0)
+                    
+                #Save updated h matrix
+                save_h_matrices[int((t+1) / time_steps_save_h -1)] = agent.h_matrix
+             
+            #Saving
             save_rewards[ep, t] = reward
             
         #Update of the H matrix at the end of the episode in case it was not updated in the last time steps
         if agent.N_upd_H != 0:
             agent._learn_post_reward(0)
-        if h_mat_allT: policy_t[ep] = agent.h_matrix[0,:] / agent.h_matrix.sum(0)
         
-      
-    return (save_rewards, policy_t) if h_mat_allT else (save_rewards, agent.h_matrix)
+    return (save_rewards, save_h_matrices)
+    
 
-# %% ../nbs/lib_nbs/06_robot_search.ipynb 37
+# %% ../nbs/lib_nbs/06_robot_search.ipynb 40
 @jit(nopython = NOPYTHON, parallel = True)
 def run_robot_training_parallel(episodes, # Number of episodes
                                 time_ep, # Length of episode
                                 N_agents, # Number of agents               
-                                h_mat_allT = False, # If to save the h_matrix at all times
+                                time_steps_save_h = None, # Every how many steps is the h matrix stored
                                 Nt = 100, # From here are props of the environment (see TargetEnv for details) 
                                 L = 100, 
                                 r = 0.5, 
@@ -450,18 +452,22 @@ def run_robot_training_parallel(episodes, # Number of episodes
                                 policy_type = 'standard', 
                                 beta_softmax = 3,  
                                 fixed_policy = np.array([[],[]]),
-                                max_no_H_update = int(1e3)
+                                max_no_H_update = int(1e4),
+                                g_update = 's'
                                ):
     #mean reward per episode
-    #save_rewards = np.zeros((N_agents, episodes))
+    save_rewards = np.zeros((N_agents, episodes))
     
     #reward per time step (for single but long episodes)
-    save_rewards = np.zeros((N_agents, time_ep))
+    #save_rewards = np.zeros((N_agents, time_ep))
     
-    if h_mat_allT:
-        save_h_matrix = np.zeros((N_agents, episodes, size_state_space[0]))  
-    else:        
-        save_h_matrix = np.zeros((N_agents, num_actions, size_state_space[0])) 
+    #storage of h matrices
+    if time_steps_save_h == None:
+        time_steps_save_h = time_ep
+    
+    number_stored_h_matrices = int(time_ep / time_steps_save_h)
+    save_h_matrix = np.zeros((N_agents, number_stored_h_matrices, num_actions, size_state_space[0]))  
+     
     
     for n_agent in prange(N_agents):
         
@@ -469,22 +475,22 @@ def run_robot_training_parallel(episodes, # Number of episodes
         
         agent = Forager(num_actions,size_state_space,gamma_damping,
                         eta_glow_damping,policy_type,beta_softmax,
-                        initial_prob_distr,fixed_policy,max_no_H_update)
+                        initial_prob_distr,fixed_policy,max_no_H_update,g_update)
                           
-        rews, mat = train_loop_robot(episodes, time_ep, agent, env, h_mat_allT)
+        rews, mat = train_loop_robot(episodes, time_ep, agent, env, time_steps_save_h)
              
         #mean reward per episode
-        #for t in range(episodes):
-            #save_rewards[n_agent, t] = np.mean(rews[t])
+        for t in range(episodes):
+            save_rewards[n_agent, t] = np.mean(rews[t])
             
         #reward per time step (for single but long episodes)
-        save_rewards[n_agent,:] = rews[0,:]
+        #save_rewards[n_agent,:] = rews[0,:]
         
         save_h_matrix[n_agent] = mat
         
     return save_rewards, save_h_matrix
 
-# %% ../nbs/lib_nbs/06_robot_search.ipynb 41
+# %% ../nbs/lib_nbs/06_robot_search.ipynb 44
 @jit(nopython = NOPYTHON)
 def single_robot_trajectory(time_ep : int, # Length of each run / episode
                             policy : np.array, # Policy of the walker (rows: states. columns:prob of doing each action)
@@ -507,19 +513,13 @@ def single_robot_trajectory(time_ep : int, # Length of each run / episode
         
         agent_positions[t,:] = env.positions[0] #position of agent with index 0
         
-        if t == 0 or env.current_rewards[0] == 1:
-            # change direction
+        #step to set counter to its min value n=1
+        if t == 0:
+            #do one step with random direction (no learning in this step)
             action = rand_choice_nb(arr = np.arange(1, len(policy[0])), prob = np.array([1/len(np.arange(1,len(policy[0])))]*len(np.arange(1,len(policy[0])))))
             _,_ = env.update_pos(action)
             #check boundary conditions
             env.check_bc()
-            #reset counter
-            agent_state = 0
-            #update current rewards
-            env.current_rewards[0] = 0
-            reward = 0
-            #update replenishing times
-            env.update_replenishing_times()
             
 
         else: 
@@ -541,13 +541,16 @@ def single_robot_trajectory(time_ep : int, # Length of each run / episode
                 agent_state += 1
             else: #turn
                 agent_state = 0
+                
+            if reward == 1:
+                agent_state = 0
 
             number_visited_targets += reward
             rew_per_timestep[t] += reward
                 
     return (number_visited_targets, agent_positions, env.target_positions, rew_per_timestep) 
 
-# %% ../nbs/lib_nbs/06_robot_search.ipynb 42
+# %% ../nbs/lib_nbs/06_robot_search.ipynb 45
 @jit(nopython = NOPYTHON, parallel = True)
 def parallel_robots_trajectories(time_ep : int, # Length of each run / episode
                                  N_agents : int, # Number of agents to consider

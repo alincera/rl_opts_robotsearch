@@ -220,6 +220,10 @@ class Forager():
         probs = self.probability_distr(percept, h_matrix = current_h_mat)        
         action = rand_choice_nb(arr = np.arange(self.num_actions), prob = probs)
         
+        # Update the counters of time steps without updating the H and G matrices.
+        self.N_upd_H += 1
+        self.N_upd_G += 1 
+        
         # Update the G matrix for current (s,a) tuple
         self._G_upd_single_percept(percept, action)
         
@@ -310,10 +314,10 @@ class Forager():
         """
         
         # If the agent changes direction   
-        if action == 1:
-            self.agent_state = 0
+        if action == 0:
+            self.agent_state += 1
         else:
-            self.agent_state += 1  
+            self.agent_state = 0  
             
     
     def get_state(self):  
